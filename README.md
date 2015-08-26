@@ -1,9 +1,6 @@
 # SpotifyBot
 Reddit Spotify Bot
 
-Getting Started
-===============
-
 Required Packages
 -----------------
 
