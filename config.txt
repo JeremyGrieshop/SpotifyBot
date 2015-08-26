@@ -1,0 +1,7 @@
+[Reddit]
+username = <reddit_user>
+password = <reddit_pw>
+
+[Spotify]
+username = <spotify_user>
+password = <spotify_pw>
