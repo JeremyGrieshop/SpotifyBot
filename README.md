@@ -1,0 +1,2 @@
+# SpotifyBot
+Reddit Spotify Bot
