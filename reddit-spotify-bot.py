@@ -1,10 +1,14 @@
 import time
+import pytz
 import praw
 import spotify
 import pprint
 import threading
 import ConfigParser
-#import tinyurl
+import MySQLdb
+import traceback
+import datetime
+import tzlocal
 
 from praw.errors import ExceptionList, APIException, RateLimitExceeded
 
@@ -15,8 +19,15 @@ config.read("config.txt")
 # Set our Reddit Bot Account and Spotify Account variables
 reddit_user = config.get("Reddit", "username")
 reddit_pw = config.get("Reddit", "password")
+
 spotify_user = config.get("Spotify", "username")
 spotify_pw = config.get("Spotify", "password")
+
+# Connect to our database
+db_user = config.get("SQL", "username")
+db_pw = config.get("SQL", "password")
+
+db = MySQLdb.connect(host="localhost", user=db_user, passwd=db_pw, db="reddit")
 
 # Subreddits to look for
 subreddits = "SpotifyBot+AskReddit+Music"
@@ -27,36 +38,36 @@ msg_created = (
 	"\n\nBased on your comments, "
 	"I think you requested a Spotify Playlist to be created."
 	"This playlist has been auto-generated for you:"
-	"\n{playlist}"
+	"\n\n{playlist}"
 	)
 
 msg_pm_created = (
 	"Greetings from the SpotifyBot!"
 	"\n\nI think you requested a Spotify Playlist to be created, "
-	"based on your comments in this submission:\n {submission}"
+	"based on your comments in this submission:\n\n {submission}"
 	"\n\nThis playlist has been auto-generated for you:"
-	"\n{playlist}"
+	"\n\n{playlist}"
 	)
 
 msg_already_created = (
 	"Greetings from the SpotifyBot!"
 	"\n\nI think you requested a Spotify Playlist to be created, "
 	"based on your comments.  A playlist has already been created here:"
-	"\n{playlist}"
+	"\n\n{playlist}"
 	)
 
 msg_pm_already_created = (
 	"Greetings from the SpotifyBot!"
 	"\n\nI think you requested a Spotify Playlist to be created, "
-	"based on your comments in this submission:\n {submission}"
+	"based on your comments in this submission:\n\n {submission}"
 	"\n\nA playlist has already been created here:"
-	"\n{playlist}"
+	"\n\n{playlist}"
 	)
 
 msg_pm_no_tracks = (
 	"Greetings from the SpotifyBot!"
 	"\n\nI think you requested a Spotify Playlist to be created, "
-	"based on your comments in this submission:\n {submission}"
+	"based on your comments in this submission:\n\n {submission}"
 	"\n\nUnfortunately, I could not find any valid tracks from the top-level comments!"
 	)
 	
@@ -91,31 +102,45 @@ def logout(session):
 
     logged_out_event.wait(10)
 
-def append_submission_to_file(submission, playlist):
-	with open("submissions.txt", "a") as myfile:
-		myfile.write(submission.url + " " + playlist)
-		myfile.write("\n")
-		myfile.close()
+def append_submission_to_db(submission, playlist):
+	db_cursor = db.cursor()
+	cmd = "insert into Submissions (submission_url, playlist_url) values(%s, %s)"
+	db_cursor.execute(cmd, [submission.url, playlist])
+	db.commit()
+	db_cursor.close()
 
-def get_submission(submission):
-	submissions = open("submissions.txt").read().splitlines()
-	for line in submissions:
-		if submission.url in line:
-			return line.split()[1]
-	return None
+def get_submission_playlist(submission_url):
+	db_cursor = db.cursor()
+	query = "select submission_url, playlist_url from Submissions where submission_url=%s"
+	db_cursor.execute(query, [submission_url])
+	data = db_cursor.fetchall()
+	db_cursor.close()
 
-def append_comment_to_file(comment_id):
-	with open("comments.txt", "a") as myfile:
-		myfile.write(comment_id)
-		myfile.write("\n")
-		myfile.close()
+	if len(data) == 0:
+		return None
+	else:
+		for row in data:
+			# should only be one row returned
+			return row[1]
+		
+def append_comment_to_db(comment_id):
+	db_cursor = db.cursor()
+	cmd = "insert into Comments (comment_id) values(%s)"
+	db_cursor.execute(cmd, [comment_id])
+        db.commit()
+	db_cursor.close()
 
 def has_commented(comment_id):
-	comments = open("comments.txt").read().splitlines()
-	if comment_id in comments:
-		return True
-	else:
+	db_cursor = db.cursor()
+	query = "select comment_id from Comments where comment_id = %s"
+	db_cursor.execute(query, [comment_id])
+	data = db_cursor.fetchall()
+	db_cursor.close()
+
+	if len(data) == 0:
 		return False
+	else:
+		return True
 
 def try_track(session, artist, track):
 	try:
@@ -142,6 +167,7 @@ def try_track(session, artist, track):
 		return None
 
 def parse_track(session, line):
+	# First look for "by" to see if it's in the format "track by artist"
 	if (" by " in line):
 		track = line.split(" by ")[0].strip()
 		artist = line.split(" by ")[1].strip()
@@ -161,6 +187,7 @@ def parse_track(session, line):
 			if t:
 				return t
 
+	# sometimes we'll see:  "cover of" in the description, which isn't part of the actual name
 	if (" cover of " in line):
 		artist = line.split(" cover of ")[0].strip()
 		track = line.split(" cover of ")[1].strip()
@@ -180,6 +207,7 @@ def parse_track(session, line):
 			if t:
 				return t
 
+	# a comment format is:  "artist - track", or "track - artist"
 	if ("-" in line):
 		track = line.split("-")[0].strip()
 		artist = line.split("-")[1].strip()
@@ -216,6 +244,7 @@ def parse_track(session, line):
 			if t:
 				return t
 
+	# when all else fails, just try to look up "track"
 	t = try_track(session, None, line.strip())
 	if t:
 		return t
@@ -247,6 +276,7 @@ def populate_playlist(playlist, tracks):
 			print("  * Adding " + track.name + " by " + track.artists[0].name + " [" + track.link.uri + "]")
 			playlist.add_tracks(track)
 		except Exception as err:
+			print "Error adding track"
 			print err
 
 def create_playlist(session, title):
@@ -270,7 +300,7 @@ def create_playlist(session, title):
 
 def comment_wants_playlist(body):
 	if len(body.split('\n')) > 3:
-		print "Skipping wall of text."
+		# Skipping wall of text
 		return False
 
 	if ("create" in body or "make" in body or "making" in body) and "spotify" in body and "playlist" in body:
@@ -287,19 +317,137 @@ def should_private_reply(submission, comment):
 	
 	return False
 
+def update_existing_playlist(session, list_url, comment):
+	if len(comment.body.split('\n')) > 5:
+		# Skipping wall of text
+		return False
+
+	link = session.get_link(list_url)
+	if not link:
+		print "Could no longer find link"
+		return False
+
+	playlist = session.get_playlist(link.uri)
+	if not playlist:
+		print "Could no longer find playlist"
+		return False
+	playlist.load()
+
+	tracks = playlist.tracks
+
+	for line in comment.body.split('\n'):
+		if not line:
+			continue
+		track = parse_track(session, line)
+		if track:
+			print "Updating existing playlist " + list_url
+			found = False
+			for t in tracks:
+				t.load()
+				if track.link.uri == t.link.uri:
+					found = True
+					break
+			if found == False:
+				print "Found new track, adding " + track.link.uri
+				playlist.add_tracks(track)
+
+def create_new_playlist(reddit, session, submission, comment):
+
+	tracks = find_tracks(session, submission)
+	num_tracks = len(tracks)
+	print("Found " + str(num_tracks) + " tracks for new playlist")
+
+	if num_tracks > 0:
+		# add a new playlist
+		new_playlist = create_playlist(session, submission.title)
+		if new_playlist:
+			print("New playlist: " + new_playlist.link.url)
+
+			populate_playlist(new_playlist, tracks)
+
+			if should_private_reply(submission, comment):
+				reddit.send_message(comment.author.name, "Spotify Playlist", msg_pm_created.format(submission=submission.url, playlist=new_playlist.link.url))
+			else:
+				comment.reply(msg_created.format(playlist=new_playlist.link.url))
+		append_comment_to_db(comment.id)
+		append_submission_to_db(submission, new_playlist.link.url)
+		print("comment and submission recorded in journal")
+	else:
+		if should_private_reply(submission, comment):
+			reddit.send_message(comment.author.name, "Spotify Playlist", msg_pm_no_tracks.format(submission=submission.url))
+		else:
+			comment.reply(msg_no_tracks)
+		append_comment_to_db(comment.id)
+		print("comment recorded in journal")
+
+def process_comment(reddit, spotify_session, comment):
+
+	# calculate how far back in the queue we currently are
+	timestamp = datetime.datetime.utcfromtimestamp(comment.created_utc)
+	timestamp_now = datetime.datetime.utcnow()
+	diff = (timestamp_now - timestamp)
+
+	print "Processing comment id=" + comment.id + ", user=" + comment.author.name + ", time_ago=" + str(diff)
+
+	# fetch the submission/playlist and check if it's in our database already
+	playlist_url = get_submission_playlist(comment.submission.url)
+	if playlist_url:
+		# it's in our database, so see if this is another request, or another track
+		print "Submission already recorded, checking comments"
+		if comment_wants_playlist(comment.body):
+			print "Sending existing playlist: " + playlist_url + " to " + comment.author.name
+			submission = reddit.get_submission(comment.submission.url)
+			if should_private_reply(submission, comment):
+				reddit.send_message(comment.author.name, "Spotify Playlist", msg_pm_already_created.format(submission=submission.url, playlist=playlist_url))
+			else:
+				comment.reply(msg_already_created.format(playlist=playlist_url))
+
+			append_comment_to_db(comment.id)
+		elif comment.is_root:
+			# already processed this submission, but perhaps this is a new track to add
+			print("\n------- Update Playlist ----------------")
+
+			login(spotify_session, spotify_user, spotify_pw)
+			try:
+				update_existing_playlist(spotify_session, playlist_url, comment)
+				append_comment_to_db(comment.id)
+			except Exception as err:
+				print "Error updating playlist"
+				print err
+
+			logout(spotify_session)
+		else:
+			print "Not a request for playlist, but also not a top-level comment"
+
+	else:
+		# it's not in our database, so see if they are requesting a playlist
+		if comment_wants_playlist(comment.body):
+			submission = reddit.get_submission(comment.submission.url)
+
+			print("\n------- Create Playlist ------------------")
+			login(spotify_session, spotify_user, spotify_pw)
+			try:
+				create_new_playlist(reddit, spotify_session, submission, comment)
+			except Exception as err:
+				print "Error creating new playlist"
+				print err
+
+			logout(spotify_session)
+
 def main():
 
-	session = spotify.Session()
-	loop = spotify.EventLoop(session)
+	spotify_session = spotify.Session()
+	loop = spotify.EventLoop(spotify_session)
 	loop.start()
 
-	r = praw.Reddit('Spotify Playlist B0t v1.0')
-	r.login(reddit_user, reddit_pw, disable_warning=True)
+	reddit = praw.Reddit('Spotify Playlist B0t v1.0')
+	reddit.login(reddit_user, reddit_pw, disable_warning=True)
 
 	while True:
 		print "Looking for comments..."
 		try:
-			for comment in praw.helpers.comment_stream(r, subreddits, limit=None, verbosity=0):
+			for comment in praw.helpers.comment_stream(reddit, subreddits, limit=None, verbosity=0):
+				# skip comments we have already processed in our database
 				if has_commented(comment.id):
 					print("Already processed this comment, ignoring..")
 					continue
@@ -308,65 +456,17 @@ def main():
 				if comment.author.name == reddit_user:
 					continue
 
-				if comment_wants_playlist(comment.body):
-					print("\n--------------------------------")
-				else:
-					continue
+				try:
+					# go ahead and attempt to process this comment
+					process_comment(reddit, spotify_session, comment)
+				except Exception as err:
+					print err
+					print traceback.format_exc()
 
-				submission = r.get_submission(comment.submission.url)
-				s = get_submission(submission)
-				if s:
-					print("Submission already processed: " + s)
-					if should_private_reply(submission, comment):
-						r.send_message(comment.author.name, "Spotify Playlist", msg_pm_already_created.format(submission=submission.url, playlist=s))
-					else:
-						comment.reply(msg_already_created.format(playlist=s))
-
-					append_comment_to_file(comment.id)
-					continue
-
-				print("Preparing to create a playlist for " + comment.permalink)
-
-				print("Logging into spotify..")
-				login(session, spotify_user, spotify_pw)
-
-				print("Looking for tracks..")
-				tracks = find_tracks(session, submission)
-				num_tracks = len(tracks)
-				print("Found " + str(num_tracks) + " tracks")
-
-				if num_tracks > 0:
-					# add a new playlist
-					new_playlist = create_playlist(session, submission.title)
-					if new_playlist:
-						print("New playlist: " + new_playlist.link.url)
-
-						populate_playlist(new_playlist, tracks)
-						print("new playlist populated for " + comment.author.name)
-
-						logout(session)
-
-						if should_private_reply(submission, comment):
-							r.send_message(comment.author.name, "Spotify Playlist", msg_pm_created.format(submission=submission.url, playlist=new_playlist.link.url))
-						else:
-							comment.reply(msg_created.format(playlist=new_playlist.link.url))
-					append_comment_to_file(comment.id)
-					append_submission_to_file(submission, new_playlist.link.url)
-					print("comment and submission recorded in journal")
-				else:
-					logout(session)
-
-					if should_private_reply(submission, comment):
-						r.send_message(comment.author.name, "Spotify Playlist", msg_pm_no_tracks.format(submission=submission.url))
-					else:
-						comment.reply(msg_no_tracks)
-					append_comment_to_file(comment.id)
-					print("comment recorded in journal")
-
-		except Exception as err:
+		except Exception as err2:
 			print "Error in main loop"
-			logout(session)
-			print err
+			print err2
+			print traceback.format_exc()
 			time.sleep(5)
 
 if __name__ == '__main__':
