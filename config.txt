@@ -5,3 +5,7 @@ password = <reddit_pw>
 [Spotify]
 username = <spotify_user>
 password = <spotify_pw>
+
+[SQL]
+username = <sql_user>
+password = <sql_pwd>
