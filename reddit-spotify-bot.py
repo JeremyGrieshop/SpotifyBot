@@ -452,6 +452,10 @@ def main():
 					print("Already processed this comment, ignoring..")
 					continue
 
+				# make sure user hasn't been deleted
+				if not comment.author:
+					continue
+
 				# make sure this comment isn't us!
 				if comment.author.name == reddit_user:
 					continue
