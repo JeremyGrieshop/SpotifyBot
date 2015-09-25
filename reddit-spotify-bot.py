@@ -390,13 +390,13 @@ def process_comment(reddit, spotify_session, comment):
 	print "Processing comment id=" + comment.id + ", user=" + comment.author.name + ", time_ago=" + str(diff)
 
 	# fetch the submission/playlist and check if it's in our database already
-	playlist_url = get_submission_playlist(comment.submission.url)
+	playlist_url = get_submission_playlist(comment.link_url)
 	if playlist_url:
 		# it's in our database, so see if this is another request, or another track
 		print "Submission already recorded, checking comments"
 		if comment_wants_playlist(comment.body):
 			print "Sending existing playlist: " + playlist_url + " to " + comment.author.name
-			submission = reddit.get_submission(comment.submission.url)
+			submission = reddit.get_submission(comment.link_url)
 			if should_private_reply(submission, comment):
 				reddit.send_message(comment.author.name, "Spotify Playlist", msg_pm_already_created.format(submission=submission.url, playlist=playlist_url))
 			else:
@@ -422,7 +422,7 @@ def process_comment(reddit, spotify_session, comment):
 	else:
 		# it's not in our database, so see if they are requesting a playlist
 		if comment_wants_playlist(comment.body):
-			submission = reddit.get_submission(comment.submission.url)
+			submission = reddit.get_submission(comment.link_url)
 
 			print("\n------- Create Playlist ------------------")
 			login(spotify_session, spotify_user, spotify_pw)
