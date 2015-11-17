@@ -9,7 +9,11 @@ import MySQLdb
 import traceback
 import datetime
 import tzlocal
+import lxml
+import urllib
+import sys
 
+from lxml import etree
 from praw.errors import ExceptionList, APIException, RateLimitExceeded
 
 # Read the config file
@@ -30,7 +34,18 @@ db_pw = config.get("SQL", "password")
 db = MySQLdb.connect(host="localhost", user=db_user, passwd=db_pw, db="reddit")
 
 # Subreddits to look for
-subreddits = "SpotifyBot+AskReddit+Music"
+subreddits = "SpotifyBot+IndieHeads+AskReddit+Music"
+
+want_phrases = {
+	"spotifybot!",
+	"someone create a spotify playlist",
+	"can someone create a spotify playlist",
+	"someone make a spotify playlist",
+	"can someone make a spotify playlist",
+	"is anyone making a spotify playlist",
+	"is someone making a spotify playlist",
+	"has anyone made a spotify playlist"
+}
 
 # define a few template messages
 msg_created = (
@@ -127,7 +142,7 @@ def append_comment_to_db(comment_id):
 	db_cursor = db.cursor()
 	cmd = "insert into Comments (comment_id) values(%s)"
 	db_cursor.execute(cmd, [comment_id])
-        db.commit()
+	db.commit()
 	db_cursor.close()
 
 def has_commented(comment_id):
@@ -149,24 +164,58 @@ def try_track(session, artist, track):
 			search = session.search(search_str)
 			search.load()
 			if search.track_total > 0:
-				# just take the first track it found
-				t = search.tracks[0]
-				t.load()
-				return t
+				for t in search.tracks:
+					if t.name == track and t.artists[0].name == artist:
+						t.load()
+						return t
+
+				# just take the first (non-karoake) track it found
+				for t in search.tracks:
+					if not ('karaoke' in t.artists[0].name):
+						t.load()
+						return t
 		else:
 			search_str = "track:" + track
 			search = session.search(search_str)
 			search.load()
 			if search.track_total > 0:
-				# just take the first track it found
-				t = search.tracks[0]
-				t.load()
-				return t
+				for t in search.tracks:
+					if t.name == track and t.artists[0].name == artist:
+						return t
+
+				# just take the first (non-karoake) track it found
+				for t in search.tracks:
+					if not ('karaoke' in t.artists[0].name):
+						t.load()
+						return t
 	except Exception as err:
 		print "Error trying track.."
+		print err
+		if str(err) == 'socket: Too many open files':
+			sys.exit()
 		return None
 
+def parse_youtube_link(session, link):
+	print "  * Parsing youtube link " + link
+	url = urllib.urlopen(link)
+	if url:
+		youtube = etree.HTML(url.read())
+		title = youtube.xpath("//span[@id='eow-title']/@title")
+		if title:
+			print "  * Trying youtube title " + ''.join(title)
+			parse_track(session, ''.join(title))
+
 def parse_track(session, line):
+	# see if we have a youtube link
+	if ("www.youtube.com/" in line):
+		for word in line.split():
+			if ("www.youtube.com/" in word):
+				if "(" in word:
+					parse_youtube_link(session, word.split("(",1)[1].split(")",1)[0])
+				else:
+					parse_youtube_link(session, word)
+
+
 	# First look for "by" to see if it's in the format "track by artist"
 	if (" by " in line):
 		track = line.split(" by ")[0].strip()
@@ -265,6 +314,8 @@ def find_tracks(session, submission):
 			if (track):
 				if not track.link.uri in tracks:
 					tracks[track.link.uri] = track
+					if track_comment.author:
+						print "Found track " + track.link.uri + " for author " + track_comment.author.name
 
 	return tracks
 
@@ -278,6 +329,8 @@ def populate_playlist(playlist, tracks):
 		except Exception as err:
 			print "Error adding track"
 			print err
+			if str(err) == 'socket: Too many open files':
+				sys.exit()
 
 def create_playlist(session, title):
 	reddit_index = -1
@@ -299,14 +352,13 @@ def create_playlist(session, title):
 	return None
 
 def comment_wants_playlist(body):
-	if len(body.split('\n')) > 3:
+	if len(body.split()) > 25:
 		# Skipping wall of text
 		return False
 
-	if ("create" in body or "make" in body or "making" in body) and "spotify" in body and "playlist" in body:
-		return True
-	elif "SpotifyBot!" in body:
-		return True
+	for str in want_phrases:
+		if str in body.lower():
+			return True
 
 	return False
 
@@ -318,7 +370,7 @@ def should_private_reply(submission, comment):
 	return False
 
 def update_existing_playlist(session, list_url, comment):
-	if len(comment.body.split('\n')) > 5:
+	if len(comment.body.split('\n')) > 3:
 		# Skipping wall of text
 		return False
 
@@ -348,7 +400,8 @@ def update_existing_playlist(session, list_url, comment):
 					found = True
 					break
 			if found == False:
-				print "Found new track, adding " + track.link.uri
+				if comment.author:
+					print "Found new track, adding " + track.link.uri + " for author " + comment.author.name
 				playlist.add_tracks(track)
 
 def create_new_playlist(reddit, session, submission, comment):
@@ -414,6 +467,8 @@ def process_comment(reddit, spotify_session, comment):
 			except Exception as err:
 				print "Error updating playlist"
 				print err
+				if str(err) == 'socket: Too many open files':
+					sys.exit()
 
 			logout(spotify_session)
 		else:
@@ -431,6 +486,8 @@ def process_comment(reddit, spotify_session, comment):
 			except Exception as err:
 				print "Error creating new playlist"
 				print err
+				if str(err) == 'socket: Too many open files':
+					sys.exit()
 
 			logout(spotify_session)
 
@@ -466,11 +523,15 @@ def main():
 				except Exception as err:
 					print err
 					print traceback.format_exc()
+					if str(err) == 'socket: Too many open files':
+						sys.exit()
 
 		except Exception as err2:
 			print "Error in main loop"
 			print err2
 			print traceback.format_exc()
+			if str(err) == 'socket: Too many open files':
+				sys.exit()
 			time.sleep(5)
 
 if __name__ == '__main__':
