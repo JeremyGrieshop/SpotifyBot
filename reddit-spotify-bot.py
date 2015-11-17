@@ -171,7 +171,7 @@ def try_track(session, artist, track):
 
 				# just take the first (non-karoake) track it found
 				for t in search.tracks:
-					if not ('karaoke' in t.artists[0].name):
+					if not ('karaoke' in t.artists[0].name.lower()):
 						t.load()
 						return t
 		else:
@@ -185,7 +185,7 @@ def try_track(session, artist, track):
 
 				# just take the first (non-karoake) track it found
 				for t in search.tracks:
-					if not ('karaoke' in t.artists[0].name):
+					if not ('karaoke' in t.artists[0].name.lower()):
 						t.load()
 						return t
 	except Exception as err:
