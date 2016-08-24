@@ -1,11 +1,15 @@
 [Reddit]
 username = <reddit_user>
-password = <reddit_pw>
+password = <reddit_password>
 
 [Spotify]
-username = <spotify_user>
-password = <spotify_pw>
+spotipy_username = <spotify_user>
+spotipy_client_id = <spotify_client_id>
+spotipy_client_secret = <spotify_client_secret>
+spotipy_redirect_uri = <spotify_redirect_uri>
 
 [SQL]
+hostname = <sql_hostname>
 username = <sql_user>
-password = <sql_pwd>
+password = <sql_password>
+database = <sql_database>
