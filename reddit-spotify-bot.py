@@ -186,8 +186,9 @@ def parse_track(spotify, line):
 		best_track = process.extractOne(search_text, choices)
 		best_t = track_hash[best_track[0]]
 
-		log("  Returning track " + best_t['name'] + " for comment [" + line + "]")
-		return best_t
+		if fuzz.ratio(line, best_track[0]) > 75:
+			log("  Returning track " + best_t['name'] + " for comment [" + line + "]")
+			return best_t
 
 	return None
 
@@ -238,8 +239,12 @@ def comment_wants_playlist(body):
 	if "spotifybot!" in body.lower():
 		return True
 
+	if (not "spotify" in body.lower()) and (not "playlist" in body.lower()):
+		return False
+
 	# otherwise, use fuzzy matching
 	if fuzz.ratio("Can someone make a Spotify playlist?", body) > 65:
+		print "Determined comment: [" + body + "] is a request for a playlist"
 		return True
 
 	return False
@@ -247,6 +252,10 @@ def comment_wants_playlist(body):
 def should_private_reply(submission, comment):
 	# the jerks over in r/Music don't like bots to post
 	if submission.subreddit.display_name.lower() == "music":
+		return True
+
+	# bots not allowed here, apparently
+	if submission.subredit.display_name.lower() == "askreddit":
 		return True
 	
 	return False
@@ -427,7 +436,10 @@ def test_search(search_text):
 
 	track = parse_track(spotify, search_text)
 
-	print("Best fit: " + track['name'] + " by " + track['artists'][0]['name'])
+	if track:
+		print("Best fit: " + track['name'] + " by " + track['artists'][0]['name'])
+	else:
+		print("No close match")
 
 def test_submission(link_url):
 
