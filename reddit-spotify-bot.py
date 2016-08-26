@@ -16,6 +16,7 @@ import tzlocal
 import lxml
 import urllib
 import sys
+import threading
 from fuzzywuzzy import fuzz
 from fuzzywuzzy import process
 
@@ -41,7 +42,7 @@ db_user = config.get("SQL", "username")
 db_pw = config.get("SQL", "password")
 db_database = config.get("SQL", "database")
 
-db = MySQLdb.connect(host="localhost", user=db_user, passwd=db_pw, db=db_database)
+db = MySQLdb.connect(host="localhost", user=db_user, passwd=db_pw, db=db_database, charset='utf8')
 
 # Subreddits to look for
 subreddits = "SpotifyBot+IndieHeads+AskReddit+Music+listentothis"
@@ -95,7 +96,7 @@ msg_no_tracks = (
 
 
 def log(message):
-	print "[" + time.strftime("%c") + "] " + message
+	print "[" + time.strftime("%c") + "] " + str(message)
 
 def append_submission_to_db(submission, playlist):
 	db_cursor = db.cursor()
@@ -185,6 +186,7 @@ def parse_track(spotify, line):
 		best_track = process.extractOne(search_text, choices)
 		best_t = track_hash[best_track[0]]
 
+		log("  Returning track " + best_t['name'] + " for comment [" + line + "]")
 		return best_t
 
 	return None
@@ -409,6 +411,7 @@ def spotify_login():
 		sys.exit()
 
 	spotify = spotipy.Spotify(auth=token)
+	log("Logged into spotify")
 
 	return spotify	
 
@@ -460,13 +463,13 @@ def main():
 	# login to reddit for PRAW API
 	reddit = reddit_login()
 
-	# login to spotify, using their OAUTH2 API
-	spotify = spotify_login()
-
 	while True:
+		# login to spotify, using their OAUTH2 API
+		spotify = spotify_login()
+
 		log("Looking for comments...")
 		try:
-			for comment in praw.helpers.comment_stream(reddit, subreddits, limit=500, verbosity=0):
+			for comment in praw.helpers.comment_stream(reddit, subreddits, limit=200, verbosity=0):
 				# skip comments we have already processed in our database
 				if has_commented(comment.id):
 					log("Already processed this comment, ignoring..")
