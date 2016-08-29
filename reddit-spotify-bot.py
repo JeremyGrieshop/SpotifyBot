@@ -615,7 +615,7 @@ def main():
 			time.sleep(1)
 
 		except Exception as err2:
-			log(str(e), 1)
+			log(str(err2), 1)
 			print traceback.format_exc()
 			time.sleep(5)
 
