@@ -44,6 +44,7 @@ db_pw = config.get("SQL", "password")
 db_database = config.get("SQL", "database")
 
 db = MySQLdb.connect(host="localhost", user=db_user, passwd=db_pw, db=db_database, charset='utf8')
+spotify = None
 
 # Subreddits to look for
 subreddits = "SpotifyBot+IndieHeads+AskReddit+Music+listentothis"
@@ -235,6 +236,8 @@ def parse_track(spotify, line):
 	try:
 		results = spotify.search(search_text, limit=50, type='track')
 	except Exception as err:
+		check_spotify_expired(err)
+
 		log("Error searching for track", 1)
 		log(str(err), 1)
 		return None
@@ -292,19 +295,36 @@ def find_tracks(spotify, submission):
 
 	return tracks
 
+def check_spotify_expired(err):
+	global spotify
+
+	if "The access token expired" in str(err):
+		spotify_login()
+		return True
+
+	return False
+
 def populate_playlist(spotify, playlist, tracks):
 
 	try:
 		spotify.user_playlist_add_tracks(spotipy_username, playlist['id'], tracks)
 	except Exception as err:
+		check_spotify_expired(err)
+
 		log("Error adding track", 1)
 		log(str(err), 1)
 
 def create_playlist(spotify, title):
 
-	playlist = spotify.user_playlist_create(spotipy_username, title)
-	if playlist:
+	try:
+		playlist = spotify.user_playlist_create(spotipy_username, title)
+
 		return playlist
+	except Exception as err:
+		check_spotify_expired(err)
+
+		log("Error creating playlist", 1)
+		log(str(err), 1)
 
 	return None
 
@@ -343,9 +363,18 @@ def update_existing_playlist(spotify, list_url, comment):
 		# Skipping wall of text
 		return False
 
-	playlist = spotify.user_playlist(spotipy_username, list_url)
-	if not playlist:
-		log("Could no longer find playlist", 1)
+	try:
+		playlist = spotify.user_playlist(spotipy_username, list_url)
+		if not playlist:
+			log("Could no longer find playlist", 1)
+			return False
+
+	except Exception as err:
+		check_spotify_expired(err)
+
+		log("Error creating playlist", 1)
+		log(str(err), 1)
+
 		return False
 
 	tracks = playlist['tracks']['items']
@@ -370,10 +399,16 @@ def update_existing_playlist(spotify, list_url, comment):
 						" for author " + 
 						comment.author.name, 2)
 
-				spotify.user_playlist_add_tracks(
-					spotipy_username, 
-					playlist['id'], 
-					{track['uri']:track})
+				try:
+					spotify.user_playlist_add_tracks(
+						spotipy_username, 
+						playlist['id'], 
+						{track['uri']:track})
+				except Exception as err:
+					check_spotify_expired(err)
+
+					log("Error adding track", 1)
+					log(str(err), 1)
 			else:
 				log("Track already in playlist, skipping", 2)
 
@@ -487,6 +522,7 @@ def reddit_login():
 	return reddit
 
 def spotify_login():
+	global spotify
 
 	token = util.prompt_for_user_token(
 			spotipy_username,
@@ -500,8 +536,6 @@ def spotify_login():
 	spotify = spotipy.Spotify(auth=token)
 	log("Logged into spotify", 1)
 
-	return spotify	
-
 def database_login():
 
 	db = MySQLdb.connect(host="localhost", user=db_user, passwd=db_pw, db="spotifybot")
@@ -509,8 +543,9 @@ def database_login():
 	return db
 
 def test_search(search_text):
+	global spotify
 
-	spotify = spotify_login()
+	spotify_login()
 
 	track = parse_comment(spotify, search_text)
 
@@ -520,8 +555,9 @@ def test_search(search_text):
 		print("No close match")
 
 def test_submission(link_url):
+	global spotify
 
-	spotify = spotify_login()
+	spotify_login()
 	reddit = reddit_login()
 
 	submission = reddit.get_submission(link_url)
@@ -534,8 +570,9 @@ def test_submission(link_url):
 		print(track['name'] + " by " + track['artists'][0]['name'])
 
 def test_update_playlist(link_url):
+	global spotify
 
-	spotify = spotify_login()
+	spotify_login()
 	reddit = reddit_login()
 
 	submission = reddit.get_submission(link_url)
@@ -559,8 +596,9 @@ def test_update_playlist(link_url):
 
 
 def test_create_playlist(title, link_url):
+	global spotify
 
-	spotify = spotify_login()
+	spotify_login()
 	reddit = reddit_login()
 
 	submission = reddit.get_submission(link_url)
@@ -574,13 +612,14 @@ def test_create_playlist(title, link_url):
 		print("New playlist created: " + new_playlist['external_urls']['spotify'])
 
 def main():
+	global spotify
 
 	# login to reddit for PRAW API
 	reddit = reddit_login()
 
 	while True:
 		# login to spotify, using their OAUTH2 API
-		spotify = spotify_login()
+		spotify_login()
 
 		log("Looking for comments...", 1)
 		try:
