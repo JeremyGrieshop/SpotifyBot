@@ -221,8 +221,6 @@ def parse_comment(spotify, line):
 
 def parse_track(spotify, line):
 
-	print "parse_track(" + line + ")"
-
 	search_text = line
 	if search_text.count(" by ") == 1:
 		search_text = search_text.replace(" by ", " ")
@@ -230,16 +228,13 @@ def parse_track(spotify, line):
 		search_text = search_text.replace(" - ", " ")
 	if search_text.count("-") == 1:
 		search_text = search_text.replace("-", " ")
-	print "search_text = " + search_text
 
 	if search_text.strip() == "":
 		return None
 
-	search_text = search_text + " AND NOT Karaoke"
-
-	log("  Searching for " + search_text + "..", 3)
+	log("  Searching for " + search_text + " AND NOT Karaoke..", 3)
 	try:
-		results = spotify.search(search_text, limit=50, type='track')
+		results = spotify.search(search_text + " AND NOT Karaoke", limit=50, type='track')
 	except Exception as err:
 		check_spotify_expired(err)
 
@@ -256,8 +251,10 @@ def parse_track(spotify, line):
 
 	if len(items) > 0:
 		for t in items:
+			log("  Appending choice: " + t['artists'][0]['name'] + " " + t['name'], 3)
 			choices.append(t['artists'][0]['name'] + " " + t['name'])
 			track_hash[t['artists'][0]['name'] + " " + t['name']] = t
+			log("  Appending choice: " + t['name'] + " " + t['artists'][0]['name'], 3)
 			choices.append(t['name'] + " " + t['artists'][0]['name'])
 			track_hash[t['name'] + " " + t['artists'][0]['name']] = t
 			#choices.append(t['name'])
@@ -266,7 +263,7 @@ def parse_track(spotify, line):
 		best_track = process.extractOne(search_text, choices)
 		best_t = track_hash[best_track[0]]
 
-		log("  Closest match: " + best_t['name'] + "(" + str(best_track[1]) + ")" + " for comment [" + line + "]", 3)
+		log("  Closest match: " + best_track[0] + " (" + str(best_track[1]) + ")" + " for comment [" + search_text + "]", 3)
 
 		if fuzz.ratio(line, best_track[0]) > 50:
 			log("  Returning track " + best_t['name'] + " for comment [" + line + "]", 2)
@@ -377,7 +374,7 @@ def update_existing_playlist(spotify, list_url, comment):
 	except Exception as err:
 		check_spotify_expired(err)
 
-		log("Error creating playlist", 1)
+		log("Error finding existing playlist", 1)
 		log(str(err), 1)
 
 		return False
