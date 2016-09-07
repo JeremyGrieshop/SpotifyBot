@@ -5,7 +5,7 @@ import pytz
 import praw
 import spotipy
 import spotipy.util as util
-from spotipy import oauth2
+from spotipy.oauth2 import SpotifyClientCredentials
 import pprint
 import threading
 import ConfigParser
@@ -20,6 +20,8 @@ import threading
 from fuzzywuzzy import fuzz
 from fuzzywuzzy import process
 import re
+import itertools
+from requests.exceptions import ReadTimeout
 
 from lxml import etree
 from praw.errors import ExceptionList, APIException, RateLimitExceeded
@@ -44,7 +46,10 @@ db_pw = config.get("SQL", "password")
 db_database = config.get("SQL", "database")
 
 db = MySQLdb.connect(host="localhost", user=db_user, passwd=db_pw, db=db_database, charset='utf8')
+
+# global spotify variables for login
 spotify = None
+token = None
 
 # Subreddits to look for
 subreddits = "SpotifyBot+IndieHeads+AskReddit+Music+listentothis"
@@ -234,10 +239,9 @@ def parse_track(spotify, line):
 
 	log("  Searching for " + search_text + " AND NOT Karaoke..", 3)
 	try:
+		spotify_login()
 		results = spotify.search(search_text + " AND NOT Karaoke", limit=50, type='track')
 	except Exception as err:
-		check_spotify_expired(err)
-
 		log("Error searching for track", 1)
 		log(str(err), 1)
 		return None
@@ -297,34 +301,40 @@ def find_tracks(spotify, submission):
 
 	return tracks
 
-def check_spotify_expired(err):
-	global spotify
-
-	if "The access token expired" in str(err):
-		spotify_login()
-		return True
-
-	return False
+def split_dict_equally(input_dict, chunks=2):
+	# prep with empty dicts
+	return_list = [dict() for idx in xrange(chunks)]
+	idx = 0
+	for k,v in input_dict.iteritems():
+		return_list[idx][k] = v
+		if idx < chunks-1:  # indexes start at 0
+			idx += 1
+		else:
+			idx = 0
+	return return_list
 
 def populate_playlist(spotify, playlist, tracks):
 
 	try:
-		spotify.user_playlist_add_tracks(spotipy_username, playlist['id'], tracks)
-	except Exception as err:
-		check_spotify_expired(err)
+		spotify_login()
 
-		log("Error adding track", 1)
+		# split it up into chunks of 50, because API won't handle that much
+		for chunk in split_dict_equally(tracks, chunks=50):
+			log("  Adding chunk of " + len(tracks) + " tracks..", 1)
+			spotify.user_playlist_add_tracks(spotipy_username, playlist['id'], chunk)
+	except Exception as err:
+		log("Error adding track(s)", 1)
 		log(str(err), 1)
+		print traceback.format_exc()
 
 def create_playlist(spotify, title):
 
 	try:
+		spotify_login()
 		playlist = spotify.user_playlist_create(spotipy_username, title)
 
 		return playlist
 	except Exception as err:
-		check_spotify_expired(err)
-
 		log("Error creating playlist", 1)
 		log(str(err), 1)
 
@@ -355,10 +365,22 @@ def should_private_reply(submission, comment):
 		return True
 
 	# bots not allowed here, apparently
-	if submission.subredit.display_name.lower() == "askreddit":
+	if submission.subreddit.display_name.lower() == "askreddit":
 		return True
 	
 	return False
+
+def get_playlist_tracks(playlist_url):
+	spotify_login()
+
+	results = spotify.user_playlist_tracks(spotipy_username, playlist_url)
+
+	tracks = results['items']
+	while results['next']:
+		results = spotify.next(results)
+		tracks.extend(results['items'])
+
+	return tracks
 
 def update_existing_playlist(spotify, list_url, comment):
 	if len(comment.body.split('\n')) > 3:
@@ -366,20 +388,19 @@ def update_existing_playlist(spotify, list_url, comment):
 		return False
 
 	try:
+		spotify_login()
 		playlist = spotify.user_playlist(spotipy_username, list_url)
 		if not playlist:
 			log("  Could no longer find playlist", 1)
 			return False
 
 	except Exception as err:
-		check_spotify_expired(err)
-
 		log("Error finding existing playlist", 1)
 		log(str(err), 1)
 
 		return False
 
-	tracks = playlist['tracks']['items']
+	tracks = get_playlist_tracks(list_url)
 
 	for line in comment.body.split('\n'):
 		if not line:
@@ -402,13 +423,12 @@ def update_existing_playlist(spotify, list_url, comment):
 						comment.author.name, 2)
 
 				try:
+					spotify_login()
 					spotify.user_playlist_add_tracks(
 						spotipy_username, 
 						playlist['id'], 
 						{track['uri']:track})
 				except Exception as err:
-					check_spotify_expired(err)
-
 					log("Error adding track", 1)
 					log(str(err), 1)
 			else:
@@ -528,8 +548,10 @@ def reddit_login():
 
 def spotify_login():
 	global spotify
+	global token
 
-	token = util.prompt_for_user_token(
+	if not token:
+		token = util.prompt_for_user_token(
 			spotipy_username,
 			client_id=spotipy_client_id,
 			client_secret=spotipy_client_secret,
@@ -581,10 +603,12 @@ def test_update_playlist(link_url):
 	reddit = reddit_login()
 
 	submission = reddit.get_submission(link_url)
-	playlist = get_submission_playlist(link_url)
-	if not playlist:
+	playlist_url = get_submission_playlist(link_url)
+	if not playlist_url:
 		log("Could no longer find playlist", 1)
 		return False
+
+	playlist = spotify.user_playlist(spotipy_username, playlist_url)
 
 	tracks = find_tracks(spotify, submission)
 	if not tracks:
@@ -594,7 +618,7 @@ def test_update_playlist(link_url):
 	try:
 		populate_playlist(spotify, playlist, tracks)
 	except Exception as e:
-		log(str(e2), 1)
+		log(str(e), 1)
 		print traceback.format_exc()
 
 	print("Playlist updated: " + playlist['external_urls']['spotify'])
@@ -615,6 +639,20 @@ def test_create_playlist(title, link_url):
 		populate_playlist(spotify, new_playlist, tracks)
 
 		print("New playlist created: " + new_playlist['external_urls']['spotify'])
+
+def test_list_playlist(playlist_url):
+	global spotify
+
+	spotify_login()
+	reddit = reddit_login()
+
+	results = spotify.user_playlist_tracks(spotipy_username, playlist_url)
+	tracks = results['items']
+	while results['next']:
+		results = spotify.next(results)
+		tracks.extend(results['items'])
+
+	print "Returned " + str(len(tracks)) + " tracks"
 
 def main():
 	global spotify
@@ -654,6 +692,10 @@ def main():
 					log(str(e2), 1)
 					print traceback.format_exc()
 
+		except ReadTimeout as read_timeout:
+			log(str(e), 1)
+			time.sleep(1)
+
 		except APIException as e:
 			log(str(e), 1)
 			time.sleep(1)
@@ -679,5 +721,8 @@ if __name__ == '__main__':
 
 		elif sys.argv[1] == "update_playlist":
 			test_update_playlist(sys.argv[2])
+
+		elif sys.argv[1] == "list_playlist":
+			test_list_playlist(sys.argv[2])
 	else:
 		main()
