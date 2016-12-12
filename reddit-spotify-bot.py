@@ -3,9 +3,10 @@
 import time
 import pytz
 import praw
+import logging
 import spotipy
 import spotipy.util as util
-from spotipy.oauth2 import SpotifyClientCredentials
+from spotipy.oauth2 import SpotifyClientCredentials, SpotifyOAuth
 import pprint
 import threading
 import ConfigParser
@@ -21,10 +22,26 @@ from fuzzywuzzy import fuzz
 from fuzzywuzzy import process
 import re
 import itertools
-from requests.exceptions import ReadTimeout
+from requests.exceptions import ReadTimeout, ConnectionError
 
 from lxml import etree
-from praw.errors import ExceptionList, APIException, RateLimitExceeded
+from praw.exceptions import APIException, ClientException, PRAWException
+
+# set logging
+try:
+    import http.client as http_client
+except ImportError:
+    import httplib as http_client
+http_client.HTTPConnection.debuglevel = 1
+
+#logging.getLogger('prawcore').setLevel(logging.DEBUG)
+#logging.getLogger('prawcore').addHandler(logging.StreamHandler())
+logging.getLogger().setLevel(logging.DEBUG)
+logging.getLogger().addHandler(logging.StreamHandler())
+requests_log = logging.getLogger("requests.packages.urllib3")
+requests_log.setLevel(logging.DEBUG)
+requests_log.propogate = True
+
 
 # Read the config file
 config = ConfigParser.ConfigParser()
@@ -33,12 +50,20 @@ config.read("config.txt")
 # Set our Reddit Bot Account
 reddit_user = config.get("Reddit", "username")
 reddit_pw = config.get("Reddit", "password")
+reddit_client_id = config.get("Reddit", "reddit_client_id")
+reddit_client_secret = config.get("Reddit", "reddit_client_secret")
 
 # Set our Spotify Account variables
 spotipy_username = config.get("Spotify", "spotipy_username")
 spotipy_client_id = config.get("Spotify", "spotipy_client_id")
 spotipy_client_secret = config.get("Spotify", "spotipy_client_secret")
 spotipy_redirect_uri = config.get("Spotify", "spotipy_redirect_uri")
+
+sp_oauth = SpotifyOAuth(spotipy_client_id,
+                     spotipy_client_secret,
+                     spotipy_redirect_uri,
+                     scope='playlist-modify-public',
+                     cache_path='.cache-' + spotipy_username)
 
 # Connect to our database
 db_user = config.get("SQL", "username")
@@ -50,9 +75,11 @@ db = MySQLdb.connect(host="localhost", user=db_user, passwd=db_pw, db=db_databas
 # global spotify variables for login
 spotify = None
 token = None
+token_info = None
 
 # Subreddits to look for
-subreddits = "SpotifyBot+IndieHeads+AskReddit+Music+listentothis"
+#subreddits = "SpotifyBot+IndieHeads+listentothis+Music+AskReddit"
+subreddits = "AskReddit"
 #subreddits = "SpotifyBot"
 
 log_level = 2
@@ -61,7 +88,7 @@ log_level = 2
 msg_created = (
 	"Greetings from the SpotifyBot!"
 	"\n\nBased on your comments, "
-	"I think you requested a Spotify Playlist to be created."
+	"I think you requested a Spotify Playlist to be created. "
 	"This playlist has been auto-generated for you:"
 	"\n\n{playlist}"
 	)
@@ -281,10 +308,10 @@ def find_tracks(spotify, submission):
 	tracks = {}
 
 	for track_comment in submission.comments:
-		if isinstance(track_comment, praw.objects.MoreComments):
+		if isinstance(track_comment, praw.models.MoreComments):
 			continue
 
-		log("Parsing comment id " + track_comment.permalink, 3)
+		log("Parsing comment id " + str(track_comment.permalink), 3)
 
 		for line in track_comment.body.split('\n'):
 			if (not line):
@@ -320,7 +347,7 @@ def populate_playlist(spotify, playlist, tracks):
 
 		# split it up into chunks of 50, because API won't handle that much
 		for chunk in split_dict_equally(tracks, chunks=50):
-			log("  Adding chunk of " + len(tracks) + " tracks..", 1)
+			log("  Adding chunk of " + str(len(tracks)) + " tracks..", 1)
 			spotify.user_playlist_add_tracks(spotipy_username, playlist['id'], chunk)
 	except Exception as err:
 		log("Error adding track(s)", 1)
@@ -330,7 +357,6 @@ def populate_playlist(spotify, playlist, tracks):
 def create_playlist(spotify, title):
 
 	try:
-		spotify_login()
 		playlist = spotify.user_playlist_create(spotipy_username, title)
 
 		return playlist
@@ -371,8 +397,6 @@ def should_private_reply(submission, comment):
 	return False
 
 def get_playlist_tracks(playlist_url):
-	spotify_login()
-
 	results = spotify.user_playlist_tracks(spotipy_username, playlist_url)
 
 	tracks = results['items']
@@ -388,7 +412,6 @@ def update_existing_playlist(spotify, list_url, comment):
 		return False
 
 	try:
-		spotify_login()
 		playlist = spotify.user_playlist(spotipy_username, list_url)
 		if not playlist:
 			log("  Could no longer find playlist", 1)
@@ -502,7 +525,7 @@ def process_comment(reddit, spotify, comment):
 		log("  submission already recorded, checking comments", 2)
 		if comment_wants_playlist(comment.body):
 			log("  Sending existing playlist: " + playlist_url + " to " + comment.author.name, 1)
-			submission = reddit.get_submission(comment.link_url)
+			submission = comment.submission
 			if should_private_reply(submission, comment):
 				reddit.send_message(
 					comment.author.name, 
@@ -530,7 +553,7 @@ def process_comment(reddit, spotify, comment):
 	else:
 		# it's not in our database, so see if they are requesting a playlist
 		if comment_wants_playlist(comment.body):
-			submission = reddit.get_submission(comment.link_url)
+			submission = comment.submission
 
 			log("\n----------- Create Playlist ------------------", 1)
 			try:
@@ -541,21 +564,58 @@ def process_comment(reddit, spotify, comment):
 
 def reddit_login():
 
-	reddit = praw.Reddit('Spotify Playlist B0t v1.0')
-	reddit.login(reddit_user, reddit_pw, disable_warning=True)
+	#reddit = praw.Reddit('Spotify Playlist B0t v1.0')
+	#reddit.login(reddit_user, reddit_pw, disable_warning=True)
+        reddit = praw.Reddit(user_agent='Spotify Playlist B0t',
+                             client_id=reddit_client_id,
+                             client_secret=reddit_client_secret,
+                             username=reddit_user,
+                             password=reddit_pw)
 
 	return reddit
 
 def spotify_login():
 	global spotify
 	global token
+	global token_info
+        global sp_oauth
+        
+	if not token or sp_oauth._is_token_expired(token_info):
+		log("Spotify token expired, getting new one", 1)
+		token_info = sp_oauth.get_cached_token()
+		if not token_info:
+			log("No token_info", 1)
+			auth_url = sp_oauth.get_authorize_url()
+			try:
+				subprocess.call(['open', auth_url])
+				print('Opening %s in your browser' % auth_url)
+			except:
+				print('Please navigate here: %s' % auth_url)
+			print('')
+			print('')
+			try:
+				response = raw_input('enter the URL you were redirected to: ')
+			except NameError:
+				response = input('Enter the URL you were directed to: ')
 
-	if not token:
-		token = util.prompt_for_user_token(
-			spotipy_username,
-			client_id=spotipy_client_id,
-			client_secret=spotipy_client_secret,
-			redirect_uri=spotipy_redirect_uri)
+			print('')
+			print('')
+
+			code = sp_oauth.parse_response_code(response)
+			token_info = sp_oauth.get_access_token(code)
+
+			token = token_info['access_token']
+		else:
+			log("Refreshing access_token", 1)
+			token_info = sp_oauth._refresh_access_token(token_info['refresh_token'])
+			token = token_info['access_token']
+
+		#token = util.prompt_for_user_token(
+		#	spotipy_username,
+		#	client_id=spotipy_client_id,
+		#	client_secret=spotipy_client_secret,
+		#	redirect_uri=spotipy_redirect_uri)
+
 	if not token:
 		log("Unable to login to spotify", 1)
 		sys.exit()
@@ -587,7 +647,7 @@ def test_submission(link_url):
 	spotify_login()
 	reddit = reddit_login()
 
-	submission = reddit.get_submission(link_url)
+	submission = praw.models.Submission(reddit, url=link_url)
 
 	tracks = find_tracks(spotify, submission)
 
@@ -602,7 +662,8 @@ def test_update_playlist(link_url):
 	spotify_login()
 	reddit = reddit_login()
 
-	submission = reddit.get_submission(link_url)
+	submission = praw.models.Submission(reddit, url=link_url)
+
 	playlist_url = get_submission_playlist(link_url)
 	if not playlist_url:
 		log("Could no longer find playlist", 1)
@@ -630,7 +691,7 @@ def test_create_playlist(title, link_url):
 	spotify_login()
 	reddit = reddit_login()
 
-	submission = reddit.get_submission(link_url)
+	submission = praw.models.Submission(reddit, url=link_url)
 
 	tracks = find_tracks(spotify, submission)
 
@@ -659,6 +720,7 @@ def main():
 
 	# login to reddit for PRAW API
 	reddit = reddit_login()
+        subreddit = reddit.subreddit(subreddits)
 
 	while True:
 		# login to spotify, using their OAUTH2 API
@@ -666,7 +728,8 @@ def main():
 
 		log("Looking for comments...", 1)
 		try:
-			for comment in praw.helpers.comment_stream(reddit, subreddits, limit=200, verbosity=0):
+			#for comment in praw.helpers.comment_stream(reddit, subreddits, limit=None, verbosity=0):
+			for comment in subreddit.stream.comments():
 				# skip comments we have already processed in our database
 				if has_commented(comment.id):
 					log("  already processed this comment, ignoring..", 2)
@@ -674,17 +737,19 @@ def main():
 
 				# make sure user hasn't been deleted
 				if not comment.author:
+					log("  skipping comment without author..", 2)
 					continue
 
 				# make sure this comment isn't us!
 				if comment.author.name == reddit_user:
+					log("  skipping my own comment..", 2)
 					continue
 
 				try:
 					# go ahead and attempt to process this comment
 					process_comment(reddit, spotify, comment)
 
-				except (RateLimitExceeded, APIException) as e:
+				except (ClientException, APIException, PRAWException) as e:
 					log(str(e), 1)
 					time.sleep(5)
 
@@ -692,8 +757,8 @@ def main():
 					log(str(e2), 1)
 					print traceback.format_exc()
 
-		except ReadTimeout as read_timeout:
-			log(str(e), 1)
+		except ConnectionError as conn_err:
+			log(str(conn_err), 1)
 			time.sleep(1)
 
 		except APIException as e:
