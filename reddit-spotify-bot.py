@@ -27,22 +27,6 @@ from requests.exceptions import ReadTimeout, ConnectionError
 from lxml import etree
 from praw.exceptions import APIException, ClientException, PRAWException
 
-# set logging
-try:
-    import http.client as http_client
-except ImportError:
-    import httplib as http_client
-http_client.HTTPConnection.debuglevel = 1
-
-#logging.getLogger('prawcore').setLevel(logging.DEBUG)
-#logging.getLogger('prawcore').addHandler(logging.StreamHandler())
-logging.getLogger().setLevel(logging.DEBUG)
-logging.getLogger().addHandler(logging.StreamHandler())
-requests_log = logging.getLogger("requests.packages.urllib3")
-requests_log.setLevel(logging.DEBUG)
-requests_log.propogate = True
-
-
 # Read the config file
 config = ConfigParser.ConfigParser()
 config.read("config.txt")
@@ -78,11 +62,13 @@ token = None
 token_info = None
 
 # Subreddits to look for
-#subreddits = "SpotifyBot+IndieHeads+listentothis+Music+AskReddit"
-subreddits = "AskReddit"
+subreddits = "SpotifyBot+IndieHeads+listentothis+Music+AskReddit"
 #subreddits = "SpotifyBot"
 
 log_level = 2
+
+# global playlists for quick lookups
+playlists = {}
 
 # define a few template messages
 msg_created = (
@@ -142,7 +128,28 @@ def append_submission_to_db(submission, playlist):
 	db.commit()
 	db_cursor.close()
 
+def load_submission_playlists():
+        global playlists
+
+        db_cursor = db.cursor()
+	query = "select submission_url, playlist_url from Submissions"
+	db_cursor.execute(query)
+	data = db_cursor.fetchall()
+	db_cursor.close()
+
+        playlists = {}
+	if len(data) > 0:
+		for row in data:
+			playlists[row[0]] = row[1]
+
 def get_submission_playlist(submission_url):
+	global playlists
+
+	if submission_url in playlists:
+		return playlists[submission_url]
+	else:
+		return None
+
 	db_cursor = db.cursor()
 	query = "select submission_url, playlist_url from Submissions where submission_url=%s"
 	db_cursor.execute(query, [submission_url])
@@ -175,16 +182,16 @@ def has_commented(comment_id):
 	else:
 		return True
 
-def parse_youtube_link(spotify, link):
+def parse_youtube_link(link):
 	url = urllib.urlopen(link)
 	if url:
 		youtube = etree.HTML(url.read())
 		title = youtube.xpath("//span[@id='eow-title']/@title")
 		if title:
-			track = parse_track(spotify, ''.join(title))
+			track = parse_track(''.join(title))
 			return track
 
-def parse_comment(spotify, line):
+def parse_comment(line):
 
 	# see if it's a reddit link format: [fdsfsd](link)
 	expr = re.compile("\[(.+)\]\((.+)\)")
@@ -198,11 +205,10 @@ def parse_comment(spotify, line):
 			if ("www.youtube.com/" in word or "www.youtu.be/" in word):
 				if "(" in word:
 					t = parse_youtube_link(
-						spotify, 
 						word.split("(",1)[1].split(")",1)[0])
 					return t
 				else:
-					t = parse_youtube_link(spotify, word)
+					t = parse_youtube_link(word)
 					return t
 
 
@@ -217,21 +223,21 @@ def parse_comment(spotify, line):
 	line = line.strip()
 
 	# naively try the whole thing first
-	track = parse_track(spotify, line)
+	track = parse_track(line)
 	if track:
 		return track
 
 	# divide and conquer.  First, break it up into sentences
 	if "." in line:
 		for sentence in line.split("."):
-			track = parse_track(spotify, sentence)
+			track = parse_track(sentence)
 			if track:
 				return track
 
 	# now try the comma
 	if "," in line:
 		for sentence in line.split(","):
-			track = parse_track(spotify, sentence)
+			track = parse_track(sentence)
 			if track:
 				return track
 
@@ -242,7 +248,7 @@ def parse_comment(spotify, line):
 	# oh boy, now we are going to have to break it apart one-by-one
 	line = " ".join(line.split(" ")[:-1])
 	while line:
-		track = parse_track(spotify, line)
+		track = parse_track(line)
 		if track:
 			return track
 
@@ -251,7 +257,7 @@ def parse_comment(spotify, line):
 	# fail
 	return None
 
-def parse_track(spotify, line):
+def parse_track(line):
 
 	search_text = line
 	if search_text.count(" by ") == 1:
@@ -304,7 +310,7 @@ def parse_track(spotify, line):
 
 	return None
 
-def find_tracks(spotify, submission):
+def find_tracks(submission):
 	tracks = {}
 
 	for track_comment in submission.comments:
@@ -316,7 +322,7 @@ def find_tracks(spotify, submission):
 		for line in track_comment.body.split('\n'):
 			if (not line):
 				continue
-			track = parse_comment(spotify, line)
+			track = parse_comment(line)
 			if track:
 				if not track['uri'] in tracks:
 					tracks[track['uri']] = track
@@ -340,7 +346,7 @@ def split_dict_equally(input_dict, chunks=2):
 			idx = 0
 	return return_list
 
-def populate_playlist(spotify, playlist, tracks):
+def populate_playlist(playlist, tracks):
 
 	try:
 		spotify_login()
@@ -354,7 +360,7 @@ def populate_playlist(spotify, playlist, tracks):
 		log(str(err), 1)
 		print traceback.format_exc()
 
-def create_playlist(spotify, title):
+def create_playlist(title):
 
 	try:
 		playlist = spotify.user_playlist_create(spotipy_username, title)
@@ -367,20 +373,10 @@ def create_playlist(spotify, title):
 	return None
 
 def comment_wants_playlist(body):
-	if len(body.split()) > 25:
-		# Skipping wall of text
-		return False
+        lower_body = body.lower()
 
-	# the magic keyword SpotifyBot! always gets a request
-	if "spotifybot!" in body.lower():
-		return True
-
-	if (not "spotify" in body.lower()) and (not "playlist" in body.lower()):
-		return False
-
-	# otherwise, use fuzzy matching
-	if fuzz.ratio("Can someone make a Spotify playlist?", body) > 65:
-		print "Determined comment: [" + body + "] is a request for a playlist"
+	# the magic keyword SpotifyBot always gets a request
+	if "spotifybot" in lower_body:
 		return True
 
 	return False
@@ -406,7 +402,7 @@ def get_playlist_tracks(playlist_url):
 
 	return tracks
 
-def update_existing_playlist(spotify, list_url, comment):
+def update_existing_playlist(list_url, comment):
 	if len(comment.body.split('\n')) > 3:
 		# Skipping wall of text
 		return False
@@ -429,7 +425,7 @@ def update_existing_playlist(spotify, list_url, comment):
 		if not line:
 			continue
 
-		track = parse_comment(spotify, line)
+		track = parse_comment(line)
 		if track:
 			log("  Updating existing playlist " + list_url, 1)
 			found = False
@@ -457,23 +453,23 @@ def update_existing_playlist(spotify, list_url, comment):
 			else:
 				log("  Track already in playlist, skipping", 2)
 
-def create_new_playlist(reddit, spotify, submission, comment):
+def create_new_playlist(reddit, submission, comment):
 
-	tracks = find_tracks(spotify, submission)
+	tracks = find_tracks(submission)
 	num_tracks = len(tracks)
 	log("  Found " + str(num_tracks) + " tracks for new playlist", 2)
 
 	# if we have less than 10 tracks, don't bother
 	if num_tracks > 9:
 		# add a new playlist
-		new_playlist = create_playlist(spotify, submission.title)
+		new_playlist = create_playlist(submission.title)
 		if new_playlist:
 			playlist_url = new_playlist['external_urls']['spotify']
 			playlist_name = new_playlist['name']
 
 			log("  New playlist: " + playlist_url + " (" + playlist_name + ")", 1)
 
-			populate_playlist(spotify, new_playlist, tracks)
+			populate_playlist(new_playlist, tracks)
 
 			try:
 				if should_private_reply(submission, comment):
@@ -509,7 +505,7 @@ def create_new_playlist(reddit, spotify, submission, comment):
 		append_comment_to_db(comment.id)
 		log("  comment recorded in journal", 2)
 
-def process_comment(reddit, spotify, comment):
+def process_comment(reddit, comment):
 
 	# calculate how far back in the queue we currently are
 	timestamp = datetime.datetime.utcfromtimestamp(comment.created_utc)
@@ -557,7 +553,7 @@ def process_comment(reddit, spotify, comment):
 
 			log("\n----------- Create Playlist ------------------", 1)
 			try:
-				create_new_playlist(reddit, spotify, submission, comment)
+				create_new_playlist(reddit, submission, comment)
 			except Exception as err:
 				log("Error creating new playlist", 1)
 				log(str(err), 1)
@@ -649,7 +645,7 @@ def test_submission(link_url):
 
 	submission = praw.models.Submission(reddit, url=link_url)
 
-	tracks = find_tracks(spotify, submission)
+	tracks = find_tracks(submission)
 
 	print("Listing tracks..")
 	for t in tracks:
@@ -671,13 +667,13 @@ def test_update_playlist(link_url):
 
 	playlist = spotify.user_playlist(spotipy_username, playlist_url)
 
-	tracks = find_tracks(spotify, submission)
+	tracks = find_tracks(submission)
 	if not tracks:
 		log("No tracks found to add", 1)
 		return False
 
 	try:
-		populate_playlist(spotify, playlist, tracks)
+		populate_playlist(playlist, tracks)
 	except Exception as e:
 		log(str(e), 1)
 		print traceback.format_exc()
@@ -693,11 +689,11 @@ def test_create_playlist(title, link_url):
 
 	submission = praw.models.Submission(reddit, url=link_url)
 
-	tracks = find_tracks(spotify, submission)
+	tracks = find_tracks(submission)
 
-	new_playlist = create_playlist(spotify, title)
+	new_playlist = create_playlist(title)
 	if new_playlist:
-		populate_playlist(spotify, new_playlist, tracks)
+		populate_playlist(new_playlist, tracks)
 
 		print("New playlist created: " + new_playlist['external_urls']['spotify'])
 
@@ -728,7 +724,6 @@ def main():
 
 		log("Looking for comments...", 1)
 		try:
-			#for comment in praw.helpers.comment_stream(reddit, subreddits, limit=None, verbosity=0):
 			for comment in subreddit.stream.comments():
 				# skip comments we have already processed in our database
 				if has_commented(comment.id):
@@ -747,7 +742,7 @@ def main():
 
 				try:
 					# go ahead and attempt to process this comment
-					process_comment(reddit, spotify, comment)
+					process_comment(reddit, comment)
 
 				except (ClientException, APIException, PRAWException) as e:
 					log(str(e), 1)
@@ -771,6 +766,9 @@ def main():
 			time.sleep(5)
 
 if __name__ == '__main__':
+
+	# load playlists for quick retrieval
+	load_submission_playlists()
 
 	if len(sys.argv) > 1:
 		log_level = 3
