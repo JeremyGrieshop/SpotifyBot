@@ -473,9 +473,8 @@ def create_new_playlist(reddit, submission, comment):
 
 			try:
 				if should_private_reply(submission, comment):
-					reddit.send_message(
-						comment.author.name, 
-						"Spotify Playlist", 
+					reddit.redditor(comment.author.name).message(
+						"Spotify Playlist",
 						msg_pm_created.format(
 							comment=comment.permalink,
 							submission=submission.url, 
@@ -491,9 +490,8 @@ def create_new_playlist(reddit, submission, comment):
 	else:
 		try:
 			if should_private_reply(submission, comment):
-				reddit.send_message(
-					comment.author.name, 
-					"Spotify Playlist", 
+				reddit.redditor(comment.author.name).message(
+					"Spotify Playlist",
 					msg_pm_no_tracks.format(
 						comment=comment.permalink,
 						submission=submission.url))
@@ -523,12 +521,11 @@ def process_comment(reddit, comment):
 			log("  Sending existing playlist: " + playlist_url + " to " + comment.author.name, 1)
 			submission = comment.submission
 			if should_private_reply(submission, comment):
-				reddit.send_message(
-					comment.author.name, 
-					"Spotify Playlist", 
+				reddit.redditor(comment.author.name).message(
+					"Spotify Playlist",
 					msg_pm_already_created.format(
 						comment=comment.permalink,
-						submission=submission.url, 
+						submission=submission.url,
 						playlist=playlist_url))
 			else:
 				comment.reply(msg_already_created.format(playlist=playlist_url))
